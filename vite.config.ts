@@ -4,6 +4,9 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 
 export default defineConfig({
   plugins: [react(), viteSingleFile()],
+  optimizeDeps: {
+    entries: ['index.html'],
+  },
   server: {
     proxy: {
       '/api': {
