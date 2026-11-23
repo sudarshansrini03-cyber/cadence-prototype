@@ -1,18 +1,36 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { createProxyMiddleware } from 'http-proxy-middleware';
 import Groq from 'groq-sdk';
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3001;
+const viteOrigin = process.env.VITE_DEV_ORIGIN || 'http://localhost:5173';
 const groqApiKey = process.env.GROQ_API_KEY || '';
 const defaultModel = process.env.DEFAULT_MODEL || 'openai/gpt-oss-20b';
 
 const groq = groqApiKey ? new Groq({ apiKey: groqApiKey }) : null;
 
+// In dev, non-/api requests hitting this port (e.g. from the preview panel) are
+// forwarded to the Vite dev server so the frontend renders instead of "Cannot GET /".
+const viteProxy = createProxyMiddleware({
+  target: viteOrigin,
+  changeOrigin: true,
+  ws: true,
+  onError: (_err, _req, res) => {
+    res.statusCode = 502;
+    res.end('Vite dev server is not running on ' + viteOrigin);
+  },
+});
+
 app.use(cors());
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api') || (req.method !== 'GET' && req.method !== 'HEAD')) return next();
+  viteProxy(req, res, next);
+});
 app.use(express.json());
 
 // 1. Health check & status
@@ -212,6 +230,13 @@ Output strictly as JSON:
   }
 });
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`⚡ Cadence Groq AI Backend running on http://localhost:${port}`);
+  console.log(`↪ Frontend requests proxied to Vite at ${viteOrigin}`);
+});
+
+// Vite HMR websocket upgrades arrive on this port when previewing through it.
+server.on('upgrade', (req, socket, head) => {
+  if (req.url?.startsWith('/api')) return socket.destroy();
+  viteProxy.upgrade?.(req, socket, head);
 });
