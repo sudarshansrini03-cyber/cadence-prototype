@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently --kill-others-on-fail -n \"api,web\" -c \"magenta,cyan\" \"tsx server/index.ts\" \"vite\"",
     "server": "tsx server/index.ts",
+    "dev:web": "vite",
     "dev:all": "concurrently --kill-others-on-fail -n \"api,web\" -c \"magenta,cyan\" \"tsx server/index.ts\" \"vite\"",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
