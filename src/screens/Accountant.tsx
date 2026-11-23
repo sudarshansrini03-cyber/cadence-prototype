@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
-import { Button, Card, Chip, Sheet, useToast } from '../components/ui';
+import { motion } from 'framer-motion';
+import { Button, Card, Chip, Sheet, TiltCard, useToast } from '../components/ui';
 import { balance } from '../lib/matching';
 import { daysOverdue, fmtDate, inr } from '../lib/format';
 import { ranked, useStore } from '../lib/store';
@@ -32,6 +33,7 @@ export default function Accountant() {
   const [cash, setCash] = useState('');
   const [showCad, setShowCad] = useState(false);
   const [on, setOn] = useState([true, true, true, true]);
+  const [drag, setDrag] = useState(false);
   const file = useRef<HTMLInputElement>(null);
   const sel = list.find((x) => x.shop.name === open);
 
@@ -44,53 +46,76 @@ export default function Accountant() {
   };
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-end justify-between">
-        <div><h2 className="text-xl font-bold">Call first</h2><p className="text-sm text-navy/60">Today's list, most urgent first</p></div>
-        <div>
-          <input ref={file} type="file" accept=".csv" className="hidden" onChange={(e) => { onFile(e.target.files?.[0]); e.target.value = ''; }} />
-          <Button kind="ghost" onClick={() => file.current?.click()}>Import from Tally</Button>
+    <div className="space-y-5">
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="lg:col-span-2">
+          <div className="mb-3 flex items-end justify-between">
+            <div><h2 className="font-display text-xl font-bold">Call first</h2><p className="text-sm text-slate-400">Today&apos;s list, most urgent first</p></div>
+          </div>
+          <ul className="space-y-3">
+            {list.map((x, k) => (
+              <motion.li key={x.shop.name} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: k * 0.04 }}>
+                <TiltCard onClick={() => { setOpen(x.shop.name); setCash(''); }} className="p-4">
+                  <div className="flex items-center gap-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-b from-amber-300 to-amber-500 font-bold text-obsidian-900 shadow-[0_0_16px_rgba(245,158,11,0.4)]">{k + 1}</span>
+                    <span className="flex-1">
+                      <span className="block font-semibold text-white">{x.shop.name}</span>
+                      <span className="block text-sm text-slate-400">{inr(x.outstanding)} &middot; {x.days} days</span>
+                    </span>
+                    <Chip text={x.shop.status} />
+                  </div>
+                </TiltCard>
+              </motion.li>
+            ))}
+            {list.length === 0 && <Card><p className="text-sm text-slate-400">No open bills.</p></Card>}
+          </ul>
+        </div>
+
+        <div className="space-y-4">
+          <TiltCard
+            className={`flex min-h-[150px] cursor-pointer flex-col items-center justify-center gap-2 border-dashed p-5 text-center transition-colors ${drag ? 'border-emerald-400/60 bg-emerald-500/10' : ''}`}
+          >
+            <div
+              className="absolute inset-0"
+              onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+              onDragLeave={() => setDrag(false)}
+              onDrop={(e) => { e.preventDefault(); setDrag(false); onFile(e.dataTransfer.files?.[0]); }}
+              onClick={() => file.current?.click()}
+            />
+            <input ref={file} type="file" accept=".csv" className="hidden" onChange={(e) => { onFile(e.target.files?.[0]); e.target.value = ''; }} />
+            <span className="text-3xl">📥</span>
+            <p className="font-semibold text-white">Import from Tally</p>
+            <p className="text-xs text-slate-400">Drop your CSV export here or click to browse</p>
+          </TiltCard>
+
+          <Card>
+            <button className="flex w-full items-center justify-between font-bold text-white" onClick={() => setShowCad(!showCad)}>
+              Reminder cadence <span className="text-slate-400">{showCad ? '−' : '+'}</span>
+            </button>
+            {showCad && (
+              <div className="mt-3 space-y-2 text-sm">
+                {CADENCE.map((c, k) => (
+                  <label key={c} className="flex items-center gap-3 text-slate-300"><input type="checkbox" checked={on[k]} onChange={() => setOn(on.map((v, j) => (j === k ? !v : v)))} />{c}</label>
+                ))}
+                <p className="text-xs text-slate-500">Display only in this prototype. Nothing is scheduled.</p>
+              </div>
+            )}
+          </Card>
+
+          <div className="text-center">
+            <button className="text-xs text-slate-400 underline hover:text-slate-200" onClick={() => { dispatch({ t: 'reset' }); toast('Sample data restored'); }}>Reset sample data</button>
+          </div>
         </div>
       </div>
-      <ul className="space-y-2">
-        {list.map((x, k) => (
-          <li key={x.shop.name}>
-            <button onClick={() => { setOpen(x.shop.name); setCash(''); }} className="flex w-full items-center gap-3 rounded-2xl border border-[#E3D7BC] bg-white p-3 text-left">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gold font-bold">{k + 1}</span>
-              <span className="flex-1">
-                <span className="block font-semibold">{x.shop.name}</span>
-                <span className="block text-sm text-navy/60">{inr(x.outstanding)} &middot; {x.days} days</span>
-              </span>
-              <Chip text={x.shop.status} />
-            </button>
-          </li>
-        ))}
-        {list.length === 0 && <Card><p className="text-sm">No open bills.</p></Card>}
-      </ul>
-
-      <Card>
-        <button className="flex w-full items-center justify-between font-bold" onClick={() => setShowCad(!showCad)}>
-          Reminder cadence <span className="text-navy/50">{showCad ? '−' : '+'}</span>
-        </button>
-        {showCad && (
-          <div className="mt-3 space-y-2 text-sm">
-            {CADENCE.map((c, k) => (
-              <label key={c} className="flex items-center gap-3"><input type="checkbox" checked={on[k]} onChange={() => setOn(on.map((v, j) => (j === k ? !v : v)))} />{c}</label>
-            ))}
-            <p className="text-xs text-navy/50">Display only in this prototype. Nothing is scheduled.</p>
-          </div>
-        )}
-      </Card>
-      <div className="text-center"><button className="text-xs text-navy/50 underline" onClick={() => { dispatch({ t: 'reset' }); toast('Sample data restored'); }}>Reset sample data</button></div>
 
       {sel && (
         <Sheet title={sel.shop.name} onClose={() => setOpen(null)}>
-          <div className="mb-3 flex items-center justify-between"><span className="text-2xl font-bold">{inr(sel.outstanding)}</span><Chip text={sel.shop.status} /></div>
+          <div className="mb-3 flex items-center justify-between"><span className="font-display text-2xl font-bold text-white">{inr(sel.outstanding)}</span><Chip text={sel.shop.status} /></div>
           <table className="mb-4 w-full text-sm">
-            <thead><tr className="text-left text-navy/50"><th>Bill</th><th>Due</th><th className="text-right">Balance</th></tr></thead>
+            <thead><tr className="text-left text-slate-400"><th>Bill</th><th>Due</th><th className="text-right">Balance</th></tr></thead>
             <tbody>
               {sel.open.map((i) => (
-                <tr key={i.no} className="border-t border-slate-100"><td className="py-1.5">{i.no}</td><td>{fmtDate(i.due)} <span className="text-navy/50">({daysOverdue(i.due) > 0 ? daysOverdue(i.due) + 'd late' : 'not due'})</span></td><td className="text-right">{inr(balance(i))}</td></tr>
+                <tr key={i.no} className="border-t border-white/8"><td className="py-1.5 text-white">{i.no}</td><td className="text-slate-300">{fmtDate(i.due)} <span className="text-slate-500">({daysOverdue(i.due) > 0 ? daysOverdue(i.due) + 'd late' : 'not due'})</span></td><td className="text-right text-white">{inr(balance(i))}</td></tr>
               ))}
             </tbody>
           </table>
@@ -99,7 +124,7 @@ export default function Accountant() {
             <Button onClick={() => { dispatch({ t: 'remind', shop: sel.shop.name }); toast('Reminder sent. See the Shop tab.'); setOpen(null); }}>Send reminder</Button>
           </div>
           <div className="mt-3 flex gap-2">
-            <input value={cash} onChange={(e) => setCash(e.target.value.replace(/\D/g, ''))} inputMode="numeric" placeholder="Cash received (₹)" className="min-w-0 flex-1 rounded-xl border border-navy/30 px-3 py-2 text-sm" />
+            <input value={cash} onChange={(e) => setCash(e.target.value.replace(/\D/g, ''))} inputMode="numeric" placeholder="Cash received (₹)" className="min-w-0 flex-1 rounded-xl border border-white/15 bg-obsidian-700 px-3 py-2 text-sm text-white placeholder:text-slate-500" />
             <Button kind="gold" disabled={!cash || Number(cash) > sel.outstanding} onClick={() => { dispatch({ t: 'cash', shop: sel.shop.name, amount: Number(cash) }); toast('Cash logged'); setOpen(null); }}>Log cash</Button>
           </div>
         </Sheet>

@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Button, Card, Chip, useToast } from '../components/ui';
+import { motion } from 'framer-motion';
+import { Button, Card, Chip, TiltCard, useToast } from '../components/ui';
 import { balance } from '../lib/matching';
 import { inr } from '../lib/format';
 import { useStore } from '../lib/store';
@@ -51,32 +52,32 @@ function Review({ p }: { p: Payment }) {
   return (
     <div className="mt-3 space-y-2">
       <div className="flex items-center justify-between">
-        <span className="text-xs text-navy/60">Manual or AI Selection:</span>
+        <span className="text-xs text-slate-400">Manual or AI Selection:</span>
         <button
           onClick={handleAskGroq}
           disabled={aiLoading}
-          className="text-xs bg-gold text-navy font-semibold px-2.5 py-1 rounded-lg hover:bg-gold/90 transition-colors flex items-center gap-1 disabled:opacity-50"
+          className="flex items-center gap-1 rounded-lg bg-gradient-to-b from-amber-300 to-amber-500 px-2.5 py-1 text-xs font-semibold text-obsidian-900 transition-colors hover:from-amber-200 hover:to-amber-400 disabled:opacity-50"
         >
           {aiLoading ? '⚡ Analyzing…' : '✨ Ask Groq AI'}
         </button>
       </div>
 
       {aiResult && (
-        <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs space-y-1">
+        <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="space-y-1 rounded-xl border border-amber-400/30 bg-amber-500/10 p-2.5 text-xs">
           <div className="flex items-center justify-between">
-            <span className="font-bold text-amber-900">Groq Recommendation:</span>
-            <span className="px-1.5 py-0.5 rounded bg-amber-200 text-amber-900 font-semibold text-[10px]">
+            <span className="font-bold text-amber-300">Groq Recommendation:</span>
+            <span className="rounded border border-amber-400/40 bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">
               {aiResult.confidence}% Confidence
             </span>
           </div>
-          <p className="text-amber-800">{aiResult.reasoning}</p>
-        </div>
+          <p className="text-amber-100/90">{aiResult.reasoning}</p>
+        </motion.div>
       )}
 
-      <select value={shop} onChange={(e) => setShop(e.target.value)} className="w-full rounded-xl border border-navy/30 px-3 py-2 text-sm" aria-label="Shop for this payment">
+      <select value={shop} onChange={(e) => setShop(e.target.value)} className="w-full rounded-xl border border-white/15 bg-obsidian-700 px-3 py-2 text-sm text-white" aria-label="Shop for this payment">
         <option value="">Pick a shop</option>{shops.map((s) => <option key={s}>{s}</option>)}
       </select>
-      <select value={chosen} onChange={(e) => setInv(e.target.value)} disabled={!shop} className="w-full rounded-xl border border-navy/30 px-3 py-2 text-sm" aria-label="Bill">
+      <select value={chosen} onChange={(e) => setInv(e.target.value)} disabled={!shop} className="w-full rounded-xl border border-white/15 bg-obsidian-700 px-3 py-2 text-sm text-white" aria-label="Bill">
         {bills.map((b) => <option key={b.no} value={b.no}>Bill {b.no} &middot; {inr(balance(b))} due</option>)}
       </select>
       <Button kind="gold" disabled={!shop || !chosen} onClick={handleConfirm}>Confirm match</Button>
@@ -84,31 +85,42 @@ function Review({ p }: { p: Payment }) {
   );
 }
 
+const STATE_BADGE: Record<Payment['state'], { text: string; cls: string }> = {
+  pending: { text: 'Waiting', cls: 'bg-cyan-500/15 text-cyan-300 border-cyan-400/30' },
+  matched: { text: 'Matched', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-400/30' },
+  confirmed: { text: 'Matched', cls: 'bg-emerald-500/15 text-emerald-300 border-emerald-400/30' },
+  review: { text: 'Needs a person', cls: 'bg-red-500/15 text-red-300 border-red-400/30' },
+};
+
 export default function Matching() {
   const { state, dispatch } = useStore();
   const pending = state.payments.filter((p) => p.state === 'pending').length;
   const review = state.payments.filter((p) => p.state === 'review').length;
   return (
     <div className="space-y-4">
-      <div className="flex items-end justify-between gap-2">
-        <div><h2 className="text-xl font-bold">Incoming payments</h2><p className="text-sm text-navy/60">{pending} waiting &middot; {review} need a person</p></div>
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <div><h2 className="font-display text-xl font-bold text-white">Incoming payments</h2><p className="text-sm text-slate-400">{pending} waiting &middot; {review} need a person</p></div>
         <Button disabled={!pending} onClick={() => dispatch({ t: 'runMatch' })}>Run auto-match</Button>
       </div>
-      {state.payments.map((p) => (
-        <Card key={p.id}>
-          <div className="flex items-start justify-between gap-2">
-            <div><p className="font-semibold">{p.payer}</p><p className="text-xs text-navy/50">{p.ref} &middot; {p.time}</p></div>
-            <div className="text-right"><p className="font-bold">{inr(p.amount)}</p>
-              {p.state === 'pending' && <Chip text="Waiting" />}
-              {(p.state === 'matched' || p.state === 'confirmed') && <Chip text="Matched" />}
-              {p.state === 'review' && <Chip text="Needs a person" />}
-            </div>
-          </div>
-          {(p.state === 'matched' || p.state === 'confirmed') && <p className="mt-2 text-sm text-navy/70">{p.shop} &middot; bill {p.invoices?.join(', ')}<br /><span className="text-xs text-navy/50">{p.how}</span></p>}
-          {p.state === 'review' && (<><p className="mt-2 text-sm text-red-800">{p.how}</p><Review p={p} /></>)}
-        </Card>
-      ))}
-      {state.payments.length === 0 && <Card><p className="text-sm">No payments yet. Use the Shop tab to simulate one.</p></Card>}
+      {state.payments.map((p, k) => {
+        const badge = STATE_BADGE[p.state];
+        return (
+          <motion.div key={p.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: k * 0.04 }}>
+            <TiltCard className="p-4">
+              <div className="flex items-start justify-between gap-2">
+                <div><p className="font-semibold text-white">{p.payer}</p><p className="text-xs text-slate-500">{p.ref} &middot; {p.time}</p></div>
+                <div className="text-right">
+                  <p className="font-display font-bold text-white">{inr(p.amount)}</p>
+                  <span className={`mt-1 inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold ${badge.cls}`}>{badge.text}</span>
+                </div>
+              </div>
+              {(p.state === 'matched' || p.state === 'confirmed') && <p className="mt-2 text-sm text-slate-300">{p.shop} &middot; bill {p.invoices?.join(', ')}<br /><span className="text-xs text-slate-500">{p.how}</span></p>}
+              {p.state === 'review' && (<><p className="mt-2 text-sm text-red-300">{p.how}</p><Review p={p} /></>)}
+            </TiltCard>
+          </motion.div>
+        );
+      })}
+      {state.payments.length === 0 && <Card><p className="text-sm text-slate-400">No payments yet. Use the Shop tab to simulate one.</p></Card>}
     </div>
   );
 }
