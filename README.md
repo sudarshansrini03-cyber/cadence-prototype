@@ -4,8 +4,17 @@ Friendly reminders, one-tap payments and automatic matching for FMCG distributor
 A front-end prototype for the SIDT (CS1929) project, RV University Mysuru.
 
 ## Run it
-- Quick look: double-click `Cadence_Prototype.html` (works offline, nothing to install).
-- From source: `npm install`, then `npm run dev`. Tests: `npm test`. Single-file build: `npm run build` (output in `dist/index.html`).
+- **Full Stack with Groq AI**: `npm run dev:all` (runs Groq backend on :3001 and Vite frontend on :5173).
+- **Frontend only**: `npm run dev`.
+- **Quick look**: double-click `Cadence_Prototype.html` (works offline, nothing to install).
+- **Tests**: `npm test`. Single-file build: `npm run build` (output in `dist/index.html`).
+
+## Groq LPU Backend
+Cadence features a live Express backend powered by **Groq LPU** inference (`server/index.ts`):
+- `POST /api/ai/reminder`: Generates contextually warm WhatsApp reminders in Hindi, Kannada, and English with tone selection (Friendly, Firm, Festive) in ~200ms using `openai/gpt-oss-20b`.
+- `POST /api/ai/match`: Dissects ambiguous bank/UPI payment remarks and matches them to open bills with confidence scores and reasoning using `openai/gpt-oss-120b`.
+- `POST /api/ai/voice-promise`: Understands simulated Kirana shopkeeper Hindi voice notes and extracts promised dates and amounts into the Call-first list.
+- You can toggle between models on the fly in the header (*Groq LPU pill*).
 
 ## Four screens
 1. **Owner**: outstanding money by age, collected today, who to follow up first.
