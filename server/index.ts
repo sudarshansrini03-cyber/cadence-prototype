@@ -230,6 +230,79 @@ Output strictly as JSON:
   }
 });
 
+// 5. Cadence agent: interprets a natural-language prompt against ledger context
+// and returns structured commands the frontend executes (navigate, filter, draft, upsert).
+type CadenceCommand =
+  | { type: 'navigate'; tab: 'owner' | 'accountant' | 'shop' | 'matching' }
+  | { type: 'filter_aging'; bucket: '0-30' | '31-60' | '60+' }
+  | { type: 'draft_reminder'; shopName: string; lang: 'en' | 'hi' | 'kn'; tone?: 'friendly' | 'firm' | 'festival' }
+  | { type: 'upsert_invoice'; shop: string; invoiceNo: string; invoiceDate: string; dueDate: string; amount: number }
+  | { type: 'run_match' }
+  | { type: 'summarize' };
+
+app.post('/api/cadence/agent', async (req, res) => {
+  const { prompt = '', context = {}, model = defaultModel } = req.body || {};
+  if (!prompt.trim()) return res.status(400).json({ error: 'prompt is required' });
+
+  // Deterministic offline fallback: keyword routing when Groq is not configured.
+  if (!groq) {
+    const p = prompt.toLowerCase();
+    const cmds: CadenceCommand[] = [];
+    if (/60|old|age|aging|oldest/.test(p)) cmds.push({ type: 'navigate', tab: 'owner' }, { type: 'filter_aging', bucket: '60+' });
+    else if (/match|payment|reconcil/.test(p)) cmds.push({ type: 'navigate', tab: 'matching' }, { type: 'run_match' });
+    else if (/kannada|kn/.test(p)) cmds.push({ type: 'draft_reminder', shopName: context.selectedShop || 'Lakshmi Stores', lang: 'kn' });
+    else if (/reminder|draft|whatsapp|message/.test(p)) cmds.push({ type: 'draft_reminder', shopName: context.selectedShop || 'Lakshmi Stores', lang: 'en' });
+    else if (/add|new invoice|create/.test(p)) cmds.push({ type: 'navigate', tab: 'accountant' }, { type: 'summarize' });
+    else cmds.push({ type: 'summarize' });
+    return res.json({ success: true, offline: true, reply: 'Offline mode: used a built-in fallback interpreter (no Groq key configured).', commands: cmds, model });
+  }
+
+  const startTime = Date.now();
+  const systemPrompt = `You are Cadence, the command agent for an Indian FMCG distributor's collections dashboard.
+Interpret the user's prompt against the ledger context and return STRICT JSON:
+{"reply": "<1-2 sentence friendly answer or plan>", "commands": [<list of commands to execute>]}
+
+Available commands (use only these shapes):
+{"type":"navigate","tab":"owner"|"accountant"|"shop"|"matching"}
+{"type":"filter_aging","bucket":"0-30"|"31-60"|"60+"}
+{"type":"draft_reminder","shopName":"<exact shop name>","lang":"en"|"hi"|"kn","tone":"friendly"|"firm"|"festival"}
+{"type":"upsert_invoice","shop":"<shop name>","invoiceNo":"<no>","invoiceDate":"YYYY-MM-DD","dueDate":"YYYY-MM-DD","amount":<number>}
+{"type":"run_match"}
+{"type":"summarize"}
+
+Rules:
+- Today is 2026-11-23. Resolve relative dates against it.
+- "Pull 60+ day dues" style asks => navigate owner + filter_aging 60+.
+- Reminder/draft asks => draft_reminder with the best-matching shop and language (Kannada => kn).
+- Add/record invoice asks with complete details => upsert_invoice (amount as a plain number).
+- "Match payments" => navigate matching + run_match.
+- Keep commands minimal and ordered. If the prompt is just a question, reply and include "summarize".`;
+
+  try {
+    const completion = await groq.chat.completions.create({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `LEDGER CONTEXT:\n${JSON.stringify(context)}\n\nUSER PROMPT: ${prompt}` },
+      ],
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+    });
+    const parsed = JSON.parse(completion.choices[0]?.message?.content || '{}');
+    res.json({
+      success: true,
+      offline: false,
+      reply: parsed.reply || 'Done.',
+      commands: Array.isArray(parsed.commands) ? parsed.commands : [],
+      model,
+      durationMs: Date.now() - startTime,
+    });
+  } catch (err: any) {
+    console.error('Cadence Agent API Error:', err);
+    res.status(500).json({ error: err.message || 'Cadence agent failed' });
+  }
+});
+
 const server = app.listen(port, () => {
   console.log(`⚡ Cadence Groq AI Backend running on http://localhost:${port}`);
   console.log(`↪ Frontend requests proxied to Vite at ${viteOrigin}`);

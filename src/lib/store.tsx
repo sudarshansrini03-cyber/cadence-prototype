@@ -1,5 +1,5 @@
 import { createContext, ReactNode, useContext, useEffect, useMemo, useReducer } from 'react';
-import type { Lang, Payment, State } from '../types';
+import type { Invoice, Lang, Payment, State } from '../types';
 import { initialState } from '../data/sample';
 import { allocate, autoMatch, balance } from './matching';
 import { daysOverdue, fmtDate, inr } from './format';
@@ -15,7 +15,8 @@ type Action =
   | { t: 'cash'; shop: string; amount: number }
   | { t: 'runMatch'; only?: string }
   | { t: 'pay'; shop: string; amount: number }
-  | { t: 'confirm'; id: string; shop: string; invoice: string };
+  | { t: 'confirm'; id: string; shop: string; invoice: string }
+  | { t: 'addInvoice'; invoice: Invoice };
 
 const KEY = 'cadence-prototype-v2';
 
@@ -59,6 +60,14 @@ function reducer(s: State, a: Action): State {
         }
       }
       return cur;
+    }
+    case 'addInvoice': {
+      const exists = s.invoices.some((x) => x.no === a.invoice.no);
+      const invoices = exists
+        ? s.invoices.map((x) => (x.no === a.invoice.no ? { ...x, amount: a.invoice.amount, due: a.invoice.due, shop: a.invoice.shop } : x))
+        : [...s.invoices, a.invoice];
+      const shops = s.shops.some((sh) => sh.name === a.invoice.shop) ? s.shops : [...s.shops, { name: a.invoice.shop, status: 'Not contacted' }];
+      return { ...s, invoices, shops };
     }
     case 'pay': {
       const id = 'u' + Date.now();

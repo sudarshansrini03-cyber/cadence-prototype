@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Button, Sheet, ToastProvider, useToast } from './components/ui';
 import Accountant from './screens/Accountant';
+import CadenceAgent from './components/CadenceAgent';
 import Matching from './screens/Matching';
 import Owner from './screens/Owner';
 import ShopView from './screens/ShopView';
@@ -192,6 +193,7 @@ function AppContent() {
       </nav>
 
       {aiModal}
+      <CadenceAgent tab={tab} onNavigate={setTab} />
     </div>
   );
 }
