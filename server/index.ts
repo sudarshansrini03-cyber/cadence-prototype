@@ -3,6 +3,10 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import Groq from 'groq-sdk';
+import path from 'path';
+import { fileURLToPath } from 'url';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const isProd = process.env.NODE_ENV === 'production';
 
 dotenv.config();
 
@@ -16,7 +20,7 @@ const groq = groqApiKey ? new Groq({ apiKey: groqApiKey }) : null;
 
 // In dev, non-/api requests hitting this port (e.g. from the preview panel) are
 // forwarded to the Vite dev server so the frontend renders instead of "Cannot GET /".
-const viteProxy = createProxyMiddleware({
+const viteProxy = isProd ? null : createProxyMiddleware({
   target: viteOrigin,
   changeOrigin: true,
   ws: true,
@@ -27,10 +31,14 @@ const viteProxy = createProxyMiddleware({
 });
 
 app.use(cors());
-app.use((req, res, next) => {
-  if (req.path.startsWith('/api') || (req.method !== 'GET' && req.method !== 'HEAD')) return next();
-  viteProxy(req, res, next);
-});
+if (isProd) {
+  app.use(express.static(path.resolve(__dirname, '../dist')));
+} else {
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api') || (req.method !== 'GET' && req.method !== 'HEAD')) return next();
+    viteProxy!(req, res, next);
+  });
+}
 app.use(express.json());
 
 // 1. Health check & status
@@ -395,6 +403,13 @@ app.post('/api/cadence/agent', async (req, res) => {
     res.status(500).json({ error: err.message || 'Cadence agent failed' });
   }
 });
+
+if (isProd) {
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(path.resolve(__dirname, '../dist/index.html'));
+  });
+}
 
 const server = app.listen(port, () => {
   console.log(`⚡ Cadence Groq AI Backend running on http://localhost:${port}`);
