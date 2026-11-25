@@ -241,10 +241,10 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [liveReply, setLiveReply] = useState<string | null>(null);
-  const [liveOffline, setLiveOffline] = useState(false);
   const [liveResults, setLiveResults] = useState<ExecResult[]>([]);
   const [activeModel, setActiveModel] = useState<string>(() => localStorage.getItem('cadence_ai_model') || 'openai/gpt-oss-20b');
   const scroller = useRef<HTMLDivElement>(null);
+  const askLock = useRef(false);
 
   useEffect(() => {
     if (!activeId && sessions.length === 0) createSession();
@@ -258,7 +258,8 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
   };
 
   const ask = async (prompt: string) => {
-    if (!prompt.trim() || busy) return;
+    if (!prompt.trim() || busy || askLock.current) return;
+    askLock.current = true;
     let sessionId = activeId;
     if (!sessionId) sessionId = createSession();
 
@@ -278,19 +279,18 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
     setBusy(false);
     if (!res || !res.success) {
       const fallbackReply = 'Cadence could not reach the backend. Check the Groq connection and try again.';
-      setLiveReply(fallbackReply);
-      setLiveOffline(true);
       appendEntry(sessionId, { prompt, reply: fallbackReply, offline: true, results: [], timestamp: Date.now() });
+      askLock.current = false;
       return;
     }
     // Handle model switch from server response
     if (res.switchedModel) handleSwitchModel(res.switchedModel);
 
-    setLiveOffline(!!res.offline);
-    setLiveReply(res.reply);
     const results = await executeCommands(res.commands ?? [], { onNavigate, dispatch, state, onSwitchModel: handleSwitchModel });
-    setLiveResults(results);
     appendEntry(sessionId, { prompt, reply: res.reply, offline: !!res.offline, results, timestamp: Date.now() });
+    setLiveReply(null);
+    setLiveResults([]);
+    askLock.current = false;
   };
 
   const modelLabel = GROQ_MODELS.find((m) => m.id === activeModel)?.name ?? activeModel;
@@ -404,7 +404,7 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
           )}
 
           {liveReply && !busy && (
-            <div className={`rounded-2xl border p-3 text-sm ${liveOffline ? 'border-amber-400/30 bg-amber-500/10 text-amber-100' : 'border-emerald-400/30 bg-emerald-500/10 text-emerald-50'}`}>
+            <div className="rounded-2xl border border-emerald-400/30 bg-emerald-500/10 p-3 text-sm text-emerald-50">
               {liveReply}
             </div>
           )}
