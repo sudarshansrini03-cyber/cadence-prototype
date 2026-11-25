@@ -231,70 +231,163 @@ Output strictly as JSON:
 });
 
 // 5. Cadence agent: interprets a natural-language prompt against ledger context
-// and returns structured commands the frontend executes (navigate, filter, draft, upsert).
+// and returns structured commands the frontend executes (navigate, filter, draft, upsert,
+// record_payment, business_insights, switch_model).
 type CadenceCommand =
   | { type: 'navigate'; tab: 'owner' | 'accountant' | 'shop' | 'matching' }
   | { type: 'filter_aging'; bucket: '0-30' | '31-60' | '60+' }
   | { type: 'draft_reminder'; shopName: string; lang: 'en' | 'hi' | 'kn'; tone?: 'friendly' | 'firm' | 'festival' }
   | { type: 'upsert_invoice'; shop: string; invoiceNo: string; invoiceDate: string; dueDate: string; amount: number }
   | { type: 'run_match' }
-  | { type: 'summarize' };
+  | { type: 'summarize' }
+  | { type: 'record_payment'; shop: string; amount: number; method: 'cash' | 'upi' | 'bank' }
+  | { type: 'business_insights' }
+  | { type: 'switch_model'; model: string };
+
+const VALID_MODELS = ['openai/gpt-oss-20b', 'openai/gpt-oss-120b', 'qwen/qwen3.8-27b'];
+
+const CADENCE_SYSTEM_PROMPT = `You are Cadence, an intelligent Indian retail finance advisor embedded in an FMCG distributor's collections dashboard.
+
+PERSONA — You are NOT a generic chatbot. You are a sharp, street-smart Indian collections advisor who thinks in ₹ figures, overdue days, and risk buckets. You talk like a seasoned credit manager who has worked with kirana stores, provisions shops, and agency distributors across India. You use terms like "credit cycle", "outstanding", "recovery rate", "follow-up", "due date", "overdue" naturally.
+
+VOICE RULES:
+- ALWAYS include concrete ₹ figures in your reply (e.g., "₹1,80,000 outstanding across 3 bills").
+- ALWAYS mention overdue day counts when relevant (e.g., "53 days overdue — well past the 30-day credit cycle").
+- ALWAYS give a clear next-step recommendation (e.g., "Send a firm reminder today, this account is high-risk").
+- For questions about "who owes the most", rank shops by outstanding amount and mention the top accounts.
+- For follow-up questions (e.g., "draft a reminder for them"), use conversation history to resolve "them" to the exact shop name.
+- Keep replies to 1-3 sentences. Be specific and actionable, not generic.
+- NEVER say things like "Sure, taking you to the shop section." Instead say WHY: "Ganesh Provisions has ₹1,20,000 across 2 bills, 41 days overdue — let me pull up their account so you can follow up."
+
+LEDGER CONTEXT is provided with each prompt — it contains: today's date, all shops with their outstanding amounts, overdue days, open bill counts, status, promised dates, total outstanding, collected today, recovery rate, pending payments, and the active model.
+
+Available commands (use only these shapes):
+{"type":"navigate","tab":"owner"|"accountant"|"shop"|"matching"}
+{"type":"filter_aging","bucket":"0-30"|"31-60"|"60+"}
+{"type":"draft_reminder","shopName":"<exact shop name from context>","lang":"en"|"hi"|"kn","tone":"friendly"|"firm"|"festival"}
+{"type":"upsert_invoice","shop":"<shop name>","invoiceNo":"<no>","invoiceDate":"YYYY-MM-DD","dueDate":"YYYY-MM-DD","amount":<number>}
+{"type":"run_match"}
+{"type":"summarize"}
+{"type":"record_payment","shop":"<exact shop name>","amount":<number>,"method":"cash"|"upi"|"bank"}
+{"type":"business_insights"}
+{"type":"switch_model","model":"openai/gpt-oss-20b"|"openai/gpt-oss-120b"|"qwen/qwen3.8-27b"}
+
+TOOL GUIDE:
+- "Pull 60+ day dues" / aging questions => navigate owner + filter_aging 60+
+- "Who owes the most?" / "biggest dues" => business_insights (ranks top overdue accounts)
+- "Record payment" / "got ₹X from <shop>" / "received payment" => record_payment with the shop name and amount parsed from the prompt
+- "Risk briefing" / "collection briefing" / "daily recovery" => business_insights
+- "Draft reminder for them" / "send reminder" => draft_reminder with the best-matching shop (resolve "them" from conversation history). Kannada => kn, Hindi => hi, English => en.
+- "Add invoice" / "new bill" => upsert_invoice with parsed details. If details are incomplete, ask for them in the reply and do NOT issue the command.
+- "Match payments" / "reconcile" => navigate matching + run_match
+- "Switch to <model>" / "use gpt-oss-120b" / "switch model" => switch_model with the matching model ID
+- "Summary" / "how's the book" / "snapshot" => summarize
+- For pure questions with no action needed, reply with the analysis and include "summarize" or "business_insights" so the user sees live data.
+
+RULES:
+- Today is 2026-11-23. Resolve relative dates against it.
+- Use conversation history to resolve pronouns and references ("them", "that shop", "the biggest one").
+- Keep commands minimal and ordered. Include at most one navigate per response.
+- Amount must be a plain number (e.g., 60000, not "₹60,000").
+
+Return STRICT JSON:
+{"reply": "<your advisor response with concrete ₹ figures and next steps>", "commands": [<list of commands>]}`;
 
 app.post('/api/cadence/agent', async (req, res) => {
-  const { prompt = '', context = {}, model = defaultModel } = req.body || {};
+  const { prompt = '', context = {}, model = defaultModel, history = [] } = req.body || {};
   if (!prompt.trim()) return res.status(400).json({ error: 'prompt is required' });
 
   // Deterministic offline fallback: keyword routing when Groq is not configured.
   if (!groq) {
     const p = prompt.toLowerCase();
     const cmds: CadenceCommand[] = [];
-    if (/60|old|age|aging|oldest/.test(p)) cmds.push({ type: 'navigate', tab: 'owner' }, { type: 'filter_aging', bucket: '60+' });
-    else if (/match|payment|reconcil/.test(p)) cmds.push({ type: 'navigate', tab: 'matching' }, { type: 'run_match' });
-    else if (/kannada|kn/.test(p)) cmds.push({ type: 'draft_reminder', shopName: context.selectedShop || 'Lakshmi Stores', lang: 'kn' });
-    else if (/reminder|draft|whatsapp|message/.test(p)) cmds.push({ type: 'draft_reminder', shopName: context.selectedShop || 'Lakshmi Stores', lang: 'en' });
-    else if (/add|new invoice|create/.test(p)) cmds.push({ type: 'navigate', tab: 'accountant' }, { type: 'summarize' });
-    else cmds.push({ type: 'summarize' });
-    return res.json({ success: true, offline: true, reply: 'Offline mode: used a built-in fallback interpreter (no Groq key configured).', commands: cmds, model });
+    const selectedShop = context.selectedShop || 'Lakshmi Stores';
+    let reply = 'Offline mode — I used a built-in fallback interpreter (no Groq key configured). ';
+    if (/60|old|age|aging|oldest/.test(p)) {
+      cmds.push({ type: 'navigate', tab: 'owner' }, { type: 'filter_aging', bucket: '60+' });
+      reply += `Showing 60+ day overdue bills. ${context.totalOutstanding ? `Total outstanding is ₹${context.totalOutstanding.toLocaleString('en-IN')}.` : ''}`;
+    } else if (/record|received|got.*payment|payment.*from/.test(p)) {
+      const amtMatch = p.match(/₹?\s*(\d[\d,]*)/);
+      const amt = amtMatch ? Number(amtMatch[1].replace(/,/g, '')) : 0;
+      if (amt > 0 && selectedShop) {
+        cmds.push({ type: 'record_payment', shop: selectedShop, amount: amt, method: 'cash' });
+        reply += `Recorded ₹${amt.toLocaleString('en-IN')} payment from ${selectedShop}. The Owner pillars will update live.`;
+      } else {
+        reply += 'Which shop and how much? Tell me the shop name and amount.';
+      }
+    } else if (/insight|risk|briefing|recovery|who owes|biggest|top/.test(p)) {
+      cmds.push({ type: 'business_insights' });
+      reply += `Generating a risk briefing. Recovery rate is ${context.recoveryRate || 0}%.`;
+    } else if (/switch.*model|use.*gpt|use.*qwen|change.*model/.test(p)) {
+      if (/120b/.test(p)) { cmds.push({ type: 'switch_model', model: 'openai/gpt-oss-120b' }); reply += 'Switching to GPT-OSS 120B for deeper reasoning.'; }
+      else if (/qwen/.test(p)) { cmds.push({ type: 'switch_model', model: 'qwen/qwen3.8-27b' }); reply += 'Switching to Qwen 3.8 27B for multilingual support.'; }
+      else { cmds.push({ type: 'switch_model', model: 'openai/gpt-oss-20b' }); reply += 'Switching to GPT-OSS 20B for ultra-fast responses.'; }
+    } else if (/match|payment|reconcil/.test(p)) {
+      cmds.push({ type: 'navigate', tab: 'matching' }, { type: 'run_match' });
+      reply += `Running auto-match on ${context.pendingPayments || 0} pending payment(s).`;
+    } else if (/kannada|kn/.test(p)) {
+      cmds.push({ type: 'draft_reminder', shopName: selectedShop, lang: 'kn' });
+      reply += `Drafting a Kannada reminder for ${selectedShop}.`;
+    } else if (/reminder|draft|whatsapp|message/.test(p)) {
+      cmds.push({ type: 'draft_reminder', shopName: selectedShop, lang: 'en' });
+      reply += `Drafting a WhatsApp reminder for ${selectedShop}.`;
+    } else if (/add|new invoice|create.*bill/.test(p)) {
+      cmds.push({ type: 'navigate', tab: 'accountant' }, { type: 'summarize' });
+      reply += 'Head to the Accountant tab to add the invoice. Give me the shop, bill number, amount, and due date to create it directly.';
+    } else {
+      cmds.push({ type: 'summarize' });
+      reply += `Total outstanding is ₹${(context.totalOutstanding || 0).toLocaleString('en-IN')} with ${context.pendingPayments || 0} payments pending matching.`;
+    }
+    return res.json({ success: true, offline: true, reply, commands: cmds, model });
   }
 
   const startTime = Date.now();
-  const systemPrompt = `You are Cadence, the command agent for an Indian FMCG distributor's collections dashboard.
-Interpret the user's prompt against the ledger context and return STRICT JSON:
-{"reply": "<1-2 sentence friendly answer or plan>", "commands": [<list of commands to execute>]}
+  const useModel = VALID_MODELS.includes(model) ? model : defaultModel;
 
-Available commands (use only these shapes):
-{"type":"navigate","tab":"owner"|"accountant"|"shop"|"matching"}
-{"type":"filter_aging","bucket":"0-30"|"31-60"|"60+"}
-{"type":"draft_reminder","shopName":"<exact shop name>","lang":"en"|"hi"|"kn","tone":"friendly"|"firm"|"festival"}
-{"type":"upsert_invoice","shop":"<shop name>","invoiceNo":"<no>","invoiceDate":"YYYY-MM-DD","dueDate":"YYYY-MM-DD","amount":<number>}
-{"type":"run_match"}
-{"type":"summarize"}
+  // Build messages array: system prompt + conversation history + current turn
+  const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+    { role: 'system', content: CADENCE_SYSTEM_PROMPT },
+  ];
 
-Rules:
-- Today is 2026-11-23. Resolve relative dates against it.
-- "Pull 60+ day dues" style asks => navigate owner + filter_aging 60+.
-- Reminder/draft asks => draft_reminder with the best-matching shop and language (Kannada => kn).
-- Add/record invoice asks with complete details => upsert_invoice (amount as a plain number).
-- "Match payments" => navigate matching + run_match.
-- Keep commands minimal and ordered. If the prompt is just a question, reply and include "summarize".`;
+  // Add multi-turn conversation history (compact: just the text exchanges)
+  if (Array.isArray(history)) {
+    for (const h of history.slice(-8)) {
+      if (h && h.role && h.content) {
+        messages.push({ role: h.role as 'user' | 'assistant', content: h.content });
+      }
+    }
+  }
+
+  // Current turn with full ledger context
+  messages.push({
+    role: 'user',
+    content: `LEDGER CONTEXT:\n${JSON.stringify(context)}\n\nUSER PROMPT: ${prompt}`,
+  });
 
   try {
     const completion = await groq.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `LEDGER CONTEXT:\n${JSON.stringify(context)}\n\nUSER PROMPT: ${prompt}` },
-      ],
-      temperature: 0.2,
+      model: useModel,
+      messages,
+      temperature: 0.25,
       response_format: { type: 'json_object' },
     });
     const parsed = JSON.parse(completion.choices[0]?.message?.content || '{}');
+
+    // Handle switch_model: validate the model and echo it back
+    let switchedModel: string | undefined;
+    const commands: CadenceCommand[] = Array.isArray(parsed.commands) ? parsed.commands : [];
+    const switchCmd = commands.find((c: any) => c.type === 'switch_model');
+    if (switchCmd && VALID_MODELS.includes((switchCmd as any).model)) {
+      switchedModel = (switchCmd as any).model;
+    }
+
     res.json({
       success: true,
       offline: false,
       reply: parsed.reply || 'Done.',
-      commands: Array.isArray(parsed.commands) ? parsed.commands : [],
-      model,
+      commands,
+      model: useModel,
+      switchedModel,
       durationMs: Date.now() - startTime,
     });
   } catch (err: any) {

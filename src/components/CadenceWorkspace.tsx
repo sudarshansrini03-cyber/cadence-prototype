@@ -5,11 +5,18 @@ import { balance } from '../lib/matching';
 import { daysOverdue, inr, lakh } from '../lib/format';
 import { shopSummary, useStore } from '../lib/store';
 import { generateAIReminder } from '../lib/ai';
-import { askCadence, type CadenceCommand } from '../lib/cadence';
-import { useSessions, exportSessionJSON, type ExecResult, type ConversationSession } from '../lib/sessions';
-import { OTHER_CUSTOMERS } from '../data/sample';
+import { askCadence, GROQ_MODELS, type CadenceCommand } from '../lib/cadence';
+import { useSessions, exportSessionJSON, type ExecResult, type ConversationSession, type SessionEntry } from '../lib/sessions';
+import { OTHER_CUSTOMERS, COLLECTED_BASE } from '../data/sample';
 
-const QUICK_PROMPTS = ['Pull 60+ day dues', 'Draft Kannada reminder', 'Add new invoice', 'Match payments'] as const;
+const QUICK_PROMPTS = [
+  'Who owes the most?',
+  'Pull 60+ day dues',
+  'Draft Kannada reminder',
+  'Record ₹40,000 from Annapoorna',
+  'Collection risk briefing',
+  'Switch to gpt-oss-120b',
+] as const;
 
 function agingBucket(due: string): '0-30' | '31-60' | '60+' {
   const d = daysOverdue(due);
@@ -30,9 +37,10 @@ interface ExecParams {
   onNavigate: (k: number) => void;
   dispatch: ReturnType<typeof useStore>['dispatch'];
   state: ReturnType<typeof useStore>['state'];
+  onSwitchModel: (model: string) => void;
 }
 
-async function executeCommands(cmds: CadenceCommand[], { onNavigate, dispatch, state }: ExecParams): Promise<ExecResult[]> {
+async function executeCommands(cmds: CadenceCommand[], { onNavigate, dispatch, state, onSwitchModel }: ExecParams): Promise<ExecResult[]> {
   const out: ExecResult[] = [];
   for (const c of cmds) {
     switch (c.type) {
@@ -96,13 +104,66 @@ async function executeCommands(cmds: CadenceCommand[], { onNavigate, dispatch, s
         });
         break;
       }
+      case 'record_payment': {
+        const shopName = c.shop;
+        const amt = Number(c.amount);
+        dispatch({ t: 'cash', shop: shopName, amount: amt });
+        const remaining = state.invoices
+          .filter((i) => i.shop === shopName)
+          .reduce((a, i) => a + Math.max(0, balance(i)), 0);
+        out.push({
+          kind: 'payment',
+          title: `Payment recorded: ${inr(amt)} from ${shopName}`,
+          detail: `${c.method.toUpperCase()} payment applied to oldest bills first. ${remaining > 0 ? `${inr(remaining)} still outstanding for ${shopName}.` : `${shopName} is now fully paid up.`} The 3D Owner pillars update live.`,
+        });
+        break;
+      }
+      case 'business_insights': {
+        const sums = shopSummary(state)
+          .filter((x) => x.outstanding > 0)
+          .sort((a, b) => b.outstanding - a.outstanding);
+        const totalOutstanding = sums.reduce((a, x) => a + x.outstanding, 0) + OTHER_CUSTOMERS.reduce((a, b) => a + b, 0);
+        const collectedToday = COLLECTED_BASE + state.payments.filter((p) => p.state === 'matched' || p.state === 'confirmed').reduce((a, p) => a + p.amount, 0);
+        const recoveryRate = totalOutstanding > 0 ? Math.round((collectedToday / (collectedToday + totalOutstanding)) * 100) : 0;
+        const topRisk = sums.slice(0, 4).map((x) => ({
+          label: `${x.shop.name} · ${x.days}d overdue`,
+          value: inr(x.outstanding),
+        }));
+        out.push({
+          kind: 'insights',
+          title: 'Collection risk briefing',
+          detail: `Total outstanding ${lakh(totalOutstanding)} · Recovery rate ${recoveryRate}% · ${state.payments.filter((p) => p.state === 'pending').length} payments pending. Top risk accounts ranked below.`,
+          rows: topRisk,
+        });
+        break;
+      }
+      case 'switch_model': {
+        const modelInfo = GROQ_MODELS.find((m) => m.id === c.model);
+        onSwitchModel(c.model);
+        out.push({
+          kind: 'model',
+          title: `Model switched: ${modelInfo?.name ?? c.model}`,
+          detail: `Active Groq model is now ${c.model}. Subsequent prompts will use this model for inference.`,
+        });
+        break;
+      }
     }
   }
   return dedupResults(out);
 }
 
 function chipText(kind: string): string {
-  return kind === 'ledger' ? 'Ledger updated' : kind === 'draft' ? 'Draft ready' : kind === 'filter' ? 'Filtered' : kind === 'match' ? 'Matched' : kind === 'navigate' ? 'Navigated' : 'Snapshot';
+  switch (kind) {
+    case 'ledger': return 'Ledger updated';
+    case 'draft': return 'Draft ready';
+    case 'filter': return 'Filtered';
+    case 'match': return 'Matched';
+    case 'navigate': return 'Navigated';
+    case 'payment': return 'Payment recorded';
+    case 'insights': return 'Risk briefing';
+    case 'model': return 'Model switched';
+    default: return 'Snapshot';
+  }
 }
 
 function ActionCard({ r }: { r: ExecResult }) {
@@ -182,6 +243,7 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
   const [liveReply, setLiveReply] = useState<string | null>(null);
   const [liveOffline, setLiveOffline] = useState(false);
   const [liveResults, setLiveResults] = useState<ExecResult[]>([]);
+  const [activeModel, setActiveModel] = useState<string>(() => localStorage.getItem('cadence_ai_model') || 'openai/gpt-oss-20b');
   const scroller = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -190,15 +252,29 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
 
   useEffect(() => { scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' }); }, [liveResults, liveReply, busy, activeSession?.entries.length]);
 
+  const handleSwitchModel = (model: string) => {
+    localStorage.setItem('cadence_ai_model', model);
+    setActiveModel(model);
+  };
+
   const ask = async (prompt: string) => {
     if (!prompt.trim() || busy) return;
     let sessionId = activeId;
     if (!sessionId) sessionId = createSession();
+
+    // Build conversation history from active session entries for multi-turn memory
+    const history: SessionEntry[] = activeSession ? activeSession.entries : [];
+
     setBusy(true);
     setInput('');
     setLiveReply(null);
     setLiveResults([]);
-    const res = await askCadence({ prompt, state, model: localStorage.getItem('cadence_ai_model') || undefined });
+    const res = await askCadence({
+      prompt,
+      state,
+      model: localStorage.getItem('cadence_ai_model') || undefined,
+      history,
+    });
     setBusy(false);
     if (!res || !res.success) {
       const fallbackReply = 'Cadence could not reach the backend. Check the Groq connection and try again.';
@@ -207,12 +283,17 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
       appendEntry(sessionId, { prompt, reply: fallbackReply, offline: true, results: [], timestamp: Date.now() });
       return;
     }
+    // Handle model switch from server response
+    if (res.switchedModel) handleSwitchModel(res.switchedModel);
+
     setLiveOffline(!!res.offline);
     setLiveReply(res.reply);
-    const results = await executeCommands(res.commands ?? [], { onNavigate, dispatch, state });
+    const results = await executeCommands(res.commands ?? [], { onNavigate, dispatch, state, onSwitchModel: handleSwitchModel });
     setLiveResults(results);
     appendEntry(sessionId, { prompt, reply: res.reply, offline: !!res.offline, results, timestamp: Date.now() });
   };
+
+  const modelLabel = GROQ_MODELS.find((m) => m.id === activeModel)?.name ?? activeModel;
 
   return (
     <div className="flex h-full w-full bg-obsidian-900 text-white">
@@ -252,7 +333,9 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
         </div>
 
         <div className="border-t border-white/8 p-3">
-          <p className="text-[10px] leading-snug text-slate-600">Actions here update the dashboard behind you in real time.</p>
+          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Active model</p>
+          <p className="text-[11px] text-slate-400">{modelLabel}</p>
+          <p className="mt-2 text-[10px] leading-snug text-slate-600">Actions here update the dashboard behind you in real time.</p>
         </div>
       </aside>
 
@@ -261,7 +344,7 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
         <header className="flex items-center justify-between border-b border-white/8 px-6 py-3">
           <div className="min-w-0">
             <p className="truncate font-display text-sm font-bold text-white">{activeSession?.title ?? 'Cadence Workspace'}</p>
-            <p className="text-[10px] text-slate-500">{activeSession ? `${activeSession.entries.length} messages` : 'Ready'}</p>
+            <p className="text-[10px] text-slate-500">{activeSession ? `${activeSession.entries.length} messages` : 'Ready'} · {modelLabel}</p>
           </div>
           <div className="flex shrink-0 items-center gap-3">
             {activeSession && (
@@ -287,7 +370,7 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
           {activeSession && activeSession.entries.length === 0 && !busy && !liveReply && (
             <div className="space-y-4">
               <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/5 p-4">
-                <p className="text-sm text-slate-300">Ask me to pull dues, draft reminders in any language, add invoices, or match payments — I&apos;ll act on the live ledger behind you.</p>
+                <p className="text-sm text-slate-300">I&apos;m Cadence, your collections advisor. Ask me to pull overdue dues, draft WhatsApp reminders in Hindi or Kannada, record payments, run a risk briefing, or switch AI models — I&apos;ll act on the live ledger behind you.</p>
               </div>
               <div className="flex flex-wrap gap-2">
                 {QUICK_PROMPTS.map((q) => (
@@ -341,7 +424,7 @@ export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspac
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask Cadence… e.g. 'Pull 60+ day dues'"
+              placeholder="Ask Cadence… e.g. 'Who owes the most?' or 'Record ₹25,000 from Mahadev'"
               className="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:outline-none"
             />
             <button type="submit" disabled={busy || !input.trim()} className="rounded-xl bg-gradient-to-r from-emerald-400 to-cyan-400 px-4 py-2 text-sm font-bold text-obsidian-900 disabled:opacity-40">
