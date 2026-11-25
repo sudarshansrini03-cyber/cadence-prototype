@@ -4,7 +4,7 @@ import { initialState } from '../data/sample';
 import { allocate, autoMatch, balance } from './matching';
 import { daysOverdue, fmtDate, inr } from './format';
 
-type Action =
+export type Action =
   | { t: 'reset' }
   | { t: 'import'; invoices: State['invoices'] }
   | { t: 'lang'; lang: Lang }

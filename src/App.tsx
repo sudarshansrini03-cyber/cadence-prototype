@@ -3,17 +3,28 @@ import { motion } from 'framer-motion';
 import { Button, Sheet, ToastProvider, useToast } from './components/ui';
 import Accountant from './screens/Accountant';
 import CadenceAgent from './components/CadenceAgent';
+import CadenceWorkspace from './components/CadenceWorkspace';
 import Matching from './screens/Matching';
 import Owner from './screens/Owner';
 import ShopView from './screens/ShopView';
 import { useStore } from './lib/store';
 import { checkAIHealth, type AIHealth } from './lib/ai';
+import { getSyncChannel, type SyncMessage } from './lib/sync';
 
 const TABS = [['Owner', '📊'], ['Accountant', '🧾'], ['Shop', '🏪'], ['Matching', '🔗']] as const;
 
+function isCadenceWindow(): boolean {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('window') === 'cadence';
+  } catch {
+    return false;
+  }
+}
+
 function AppContent() {
   const [tab, setTab] = useState(0);
-  const { state } = useStore();
+  const { state, dispatch } = useStore();
   const toast = useToast();
   const [aiInfo, setAiInfo] = useState<AIHealth | null>(null);
   const [showAiModal, setShowAiModal] = useState(false);
@@ -27,6 +38,31 @@ function AppContent() {
       }
     });
   }, []);
+
+  // Listen for cross-window sync messages from the Cadence workspace
+  useEffect(() => {
+    const ch = getSyncChannel();
+    if (!ch) return;
+    const handler = (e: MessageEvent<SyncMessage>) => {
+      const msg = e.data;
+      switch (msg.kind) {
+        case 'navigate':
+          setTab(msg.tab);
+          break;
+        case 'addInvoice':
+          dispatch({ t: 'addInvoice', invoice: msg.invoice });
+          break;
+        case 'runMatch':
+          dispatch({ t: 'runMatch' });
+          break;
+      }
+    };
+    ch.addEventListener('message', handler);
+    return () => {
+      ch.removeEventListener('message', handler);
+      try { ch.close(); } catch { /* ignore */ }
+    };
+  }, [dispatch]);
 
   const Screen = TABS[tab][1] && [Owner, Accountant, ShopView, Matching][tab];
   const badge = state.payments.filter((p) => p.state === 'review').length;
@@ -199,6 +235,13 @@ function AppContent() {
 }
 
 export default function App() {
+  if (isCadenceWindow()) {
+    return (
+      <ToastProvider>
+        <CadenceWorkspace />
+      </ToastProvider>
+    );
+  }
   return (
     <ToastProvider>
       <AppContent />
