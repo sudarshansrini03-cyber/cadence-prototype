@@ -6,7 +6,6 @@ import { daysOverdue, inr, lakh } from '../lib/format';
 import { shopSummary, useStore } from '../lib/store';
 import { generateAIReminder } from '../lib/ai';
 import { askCadence, type CadenceCommand } from '../lib/cadence';
-import { sendSync } from '../lib/sync';
 import { useSessions, exportSessionJSON, type ExecResult, type ConversationSession } from '../lib/sessions';
 import { OTHER_CUSTOMERS } from '../data/sample';
 
@@ -39,8 +38,8 @@ async function executeCommands(cmds: CadenceCommand[], { onNavigate, dispatch, s
     switch (c.type) {
       case 'navigate': {
         const idx = ({ owner: 0, accountant: 1, shop: 2, matching: 3 } as const)[c.tab];
-        sendSync({ kind: 'navigate', tab: idx });
-        out.push({ kind: 'navigate', title: `Switched to ${c.tab[0].toUpperCase()}${c.tab.slice(1)}`, detail: 'Dashboard navigated.' });
+        onNavigate(idx);
+        out.push({ kind: 'navigate', title: `Switched to ${c.tab[0].toUpperCase()}${c.tab.slice(1)}`, detail: 'Dashboard view changed.' });
         break;
       }
       case 'filter_aging': {
@@ -68,17 +67,13 @@ async function executeCommands(cmds: CadenceCommand[], { onNavigate, dispatch, s
       case 'upsert_invoice': {
         const invoice = { no: c.invoiceNo, shop: c.shop, date: c.invoiceDate, due: c.dueDate, amount: Number(c.amount), paid: 0 };
         dispatch({ t: 'addInvoice', invoice });
-        sendSync({ kind: 'addInvoice', invoice });
-        out.push({ kind: 'ledger', title: `Ledger updated: Bill ${c.invoiceNo}`, detail: `${c.shop} · ${inr(Number(c.amount))} due ${c.dueDate}. The 3D aging chart on the dashboard now reflects this.` });
+        out.push({ kind: 'ledger', title: `Ledger updated: Bill ${c.invoiceNo}`, detail: `${c.shop} · ${inr(Number(c.amount))} due ${c.dueDate}. The 3D aging chart now reflects this.` });
         break;
       }
       case 'run_match': {
         const pending = state.payments.filter((p) => p.state === 'pending').length;
-        if (pending) {
-          dispatch({ t: 'runMatch' });
-          sendSync({ kind: 'runMatch' });
-        }
-        out.push({ kind: 'match', title: 'Auto-match run', detail: pending ? `${pending} payment(s) processed on the dashboard.` : 'No payments were waiting.' });
+        if (pending) dispatch({ t: 'runMatch' });
+        out.push({ kind: 'match', title: 'Auto-match run', detail: pending ? `${pending} payment(s) processed. Check the Matching tab.` : 'No payments were waiting.' });
         break;
       }
       case 'summarize': {
@@ -174,7 +169,12 @@ function SessionRow({ session, active, onSelect, onDelete, onExport }: {
   );
 }
 
-export default function CadenceWorkspace() {
+export interface CadenceWorkspaceProps {
+  onNavigate: (tab: number) => void;
+  onBack: () => void;
+}
+
+export default function CadenceWorkspace({ onNavigate, onBack }: CadenceWorkspaceProps) {
   const { state, dispatch } = useStore();
   const { sessions, activeId, activeSession, setActiveId, createSession, deleteSession, appendEntry } = useSessions();
   const [input, setInput] = useState('');
@@ -183,10 +183,6 @@ export default function CadenceWorkspace() {
   const [liveOffline, setLiveOffline] = useState(false);
   const [liveResults, setLiveResults] = useState<ExecResult[]>([]);
   const scroller = useRef<HTMLDivElement>(null);
-
-  const navigateMain = (tab: number) => {
-    sendSync({ kind: 'navigate', tab });
-  };
 
   useEffect(() => {
     if (!activeId && sessions.length === 0) createSession();
@@ -197,9 +193,7 @@ export default function CadenceWorkspace() {
   const ask = async (prompt: string) => {
     if (!prompt.trim() || busy) return;
     let sessionId = activeId;
-    if (!sessionId) {
-      sessionId = createSession();
-    }
+    if (!sessionId) sessionId = createSession();
     setBusy(true);
     setInput('');
     setLiveReply(null);
@@ -215,20 +209,20 @@ export default function CadenceWorkspace() {
     }
     setLiveOffline(!!res.offline);
     setLiveReply(res.reply);
-    const results = await executeCommands(res.commands ?? [], { onNavigate: navigateMain, dispatch, state });
+    const results = await executeCommands(res.commands ?? [], { onNavigate, dispatch, state });
     setLiveResults(results);
     appendEntry(sessionId, { prompt, reply: res.reply, offline: !!res.offline, results, timestamp: Date.now() });
   };
 
   return (
-    <div className="flex h-screen bg-obsidian-900 text-white">
+    <div className="flex h-full w-full bg-obsidian-900 text-white">
       {/* Sidebar */}
       <aside className="flex w-72 shrink-0 flex-col border-r border-white/8 bg-obsidian-800/60 backdrop-blur-xl">
         <div className="flex items-center gap-3 border-b border-white/8 p-4">
           <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400 to-cyan-500 font-display text-base font-bold text-obsidian-900">C</span>
           <div className="min-w-0 flex-1">
             <h1 className="font-display text-base font-bold tracking-tight">Cadence AI</h1>
-            <p className="text-[10px] text-slate-500">Workspace · cross-window sync active</p>
+            <p className="text-[10px] text-slate-500">Workspace · live dashboard sync</p>
           </div>
         </div>
 
@@ -258,33 +252,42 @@ export default function CadenceWorkspace() {
         </div>
 
         <div className="border-t border-white/8 p-3">
-          <p className="text-[10px] leading-snug text-slate-600">Actions here sync to the dashboard window in real time.</p>
+          <p className="text-[10px] leading-snug text-slate-600">Actions here update the dashboard behind you in real time.</p>
         </div>
       </aside>
 
       {/* Chat area */}
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-white/8 px-6 py-3">
-          <div>
-            <p className="font-display text-sm font-bold text-white">{activeSession?.title ?? 'Cadence Workspace'}</p>
+          <div className="min-w-0">
+            <p className="truncate font-display text-sm font-bold text-white">{activeSession?.title ?? 'Cadence Workspace'}</p>
             <p className="text-[10px] text-slate-500">{activeSession ? `${activeSession.entries.length} messages` : 'Ready'}</p>
           </div>
-          {activeSession && (
+          <div className="flex shrink-0 items-center gap-3">
+            {activeSession && (
+              <button
+                onClick={() => exportSessionJSON(activeSession)}
+                className="flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+                Export Session Log
+              </button>
+            )}
             <button
-              onClick={() => exportSessionJSON(activeSession)}
-              className="flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 transition-colors hover:border-cyan-400/40 hover:text-cyan-300"
+              onClick={onBack}
+              className="flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition-colors hover:border-emerald-400/40 hover:bg-emerald-500/10 hover:text-emerald-200"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-              Export Session Log
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5" /><polyline points="12 19 5 12 12 5" /></svg>
+              Back to Dashboard
             </button>
-          )}
+          </div>
         </header>
 
         <div ref={scroller} className="flex-1 space-y-3 overflow-y-auto p-6">
           {activeSession && activeSession.entries.length === 0 && !busy && !liveReply && (
             <div className="space-y-4">
               <div className="rounded-2xl border border-emerald-400/20 bg-emerald-500/5 p-4">
-                <p className="text-sm text-slate-300">Ask me to pull dues, draft reminders in any language, add invoices, or match payments — I&apos;ll act on the live ledger and sync changes to your dashboard.</p>
+                <p className="text-sm text-slate-300">Ask me to pull dues, draft reminders in any language, add invoices, or match payments — I&apos;ll act on the live ledger behind you.</p>
               </div>
               <div className="flex flex-wrap gap-2">
                 {QUICK_PROMPTS.map((q) => (
