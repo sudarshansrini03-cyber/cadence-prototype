@@ -405,7 +405,7 @@ app.post('/api/cadence/agent', async (req, res) => {
 });
 
 if (isProd) {
-  app.get('*', (req, res, next) => {
+  app.use((req, res, next) => {
     if (req.path.startsWith('/api')) return next();
     res.sendFile(path.resolve(__dirname, '../dist/index.html'));
   });
